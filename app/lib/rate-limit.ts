@@ -11,30 +11,40 @@ const redis = new Redis({
 
 export async function fixedWindow({
     key,
-    record, 
     window,
     maxRequests 
 }: {
     key: string 
-    record: any 
     window: number 
     maxRequests: number 
 }) {
-    if (record == null) {
-        await redis.set(key, 1, { ex: window })
+    const script = `
+        local key = KEYS[1]
 
-        return true 
-    }
+        local window = ARGV[1]
+        local maxRequests = ARGV[2]
+        local current = redis.call('get', key)
+        
+        if (not current) then 
+            redis.call('setex', key, window, 1)
+            
+            return 1
+        end
 
-    
-    if (record >= maxRequests) {
-        return false 
-    }
-    
 
-    await redis.incr(key)
+        if (current >= maxRequests) then 
+            return 0 
+        end
 
-    return true 
+
+        redis.call('incr', key)
+
+        return 1
+    `
+
+    const result = await redis.eval(script, [key], [window, maxRequests]) 
+
+    return result == 1 
 }
 
 
@@ -49,119 +59,158 @@ export async function slidingWindow({
 }) {
     const now = Date.now()
     const windowStart = now - window * 1000
+    const member = `${now}:${Math.random()}`
 
-    await redis.zadd(key, {
-        score: now,
-        member: now.toString()
-    })
+    const script = `
+        local key = KEYS[1]
+
+        local now = ARGV[1]
+        local window = tonumber(ARGV[2])
+        local windowStart = tonumber(ARGV[3])
+        local maxRequests = tonumber(ARGV[4])
+        local member = ARGV[5]
+
+        redis.call('zremrangebyscore', key, 0, windowStart)
+        redis.call('expire', key, window)
+
+        local count = redis.call('zcard', key)
+
+        if (count > maxRequests) then 
+            return 0
+        end
 
 
-    await redis.zremrangebyscore(key, 0, windowStart)
-    await redis.expire(key, window)
+        redis.call('zadd', key, now, member)
 
-    const count = await redis.zcard(key)
+        return 1 
+    `
 
-    if (count > maxRequests) {
-        return false 
-    }
+    const result = await redis.eval(script, [key], [now, window, windowStart, maxRequests, member])
 
-
-    return true 
+    return result == 1
 }
 
 
 export async function tokenBucket({
     key,
-    record, 
     window,
     maxRequests 
 }: {
     key: string 
-    record: any 
     window: number 
     maxRequests: number 
 }) {
     const now = Date.now()
 
-    if (record == null) {
-        await redis.set(key, {
-            tokens: maxRequests - 1,
-            lastRequest: now
-        }, {
-            ex: window 
-        })
+    const script = `
+        local key = KEYS[1]
+
+        local now = tonumber(ARGV[1])
+        local maxRequests = tonumber(ARGV[2])
+        local window = tonumber(ARGV[3])
+
+        local record = redis.call('get', key)
+
+        if (not record) then 
+            local data = cjson.encode({
+                tokens = maxRequests - 1,
+                lastRequest = now
+            })
+
+            
+            redis.call('setex', key, window, data)
+
+            return 1
+        end
+        
+
+        record = cjson.decode(record)
+
+        local timeDifference = (now - record.lastRequest) / 1000
+        local refill = timeDifference * (maxRequests / window)
+        local updatedTokens = math.min(maxRequests, record.tokens + refill)
+
+        if (updatedTokens < 1) then 
+            return 0 
+        end 
 
 
-        return true 
-    }
+        local data = cjson.encode({
+            tokens = updatedTokens - 1,
+            lastRequest = now
+        }) 
 
 
-    const timeDifference = (now - record.lastRequest) / 1000
-    const refill = timeDifference * (maxRequests / window)
-    const updatedTokens = Math.min(maxRequests, record.tokens + refill)
+        redis.call('setex', key, window, data)
 
-    if (updatedTokens < 1) {
-        return false 
-    } 
-    
+        return 1
+    `
 
-    await redis.set(key, {
-        tokens: updatedTokens - 1,
-        lastRequest: now
-    }, {
-        ex: window
-    })
+    const result = await redis.eval(script, [key], [now, maxRequests, window])
 
-
-    return true 
+    return result == 1
 }
 
 
 export async function leakyBucket({
     key, 
-    record, 
     window, 
     maxRequests
 }: {
     key: string,
-    record: any,
     window: number,
     maxRequests: number
 }) {
     const now = Date.now()
 
-    if (record == null) {
-        await redis.set(key, {
-            requests: 1,
-            lastRequest: now
-        }, {
-            ex: window
+    const script = `
+        local key = KEYS[1]
+
+        local now = tonumber(ARGV[1])
+        local window = tonumber(ARGV[2])
+        local maxRequests = tonumber(ARGV[3])
+
+        local record = redis.call('get', key)
+
+        if (not record) then 
+            local data = cjson.encode({
+                requests = 1,
+                lastRequest = now
+            })
+
+        
+            redis.call('setex', key, window, data)
+
+            return 1 
+        end
+
+
+        record = cjson.decode(record)
+
+        local leakRate = maxRequests / window 
+        local elapsedSeconds = (now - record.lastRequest) / 1000
+        local leakedRequests = elapsedSeconds * leakRate
+        local newRequests = math.max(0, record.requests - leakedRequests) 
+
+        if (newRequests >= maxRequests) then 
+            return 0
+        end
+
+
+        local data = cjson.encode({
+            requests = newRequests + 1,
+            lastRequest = now
         })
 
 
-        return true
-    }
+        redis.call('setex', key, window, data)
 
+        return 1
+    `
 
-    const leakRate = maxRequests / window 
-    const elapsedSeconds = (now - record.lastRequest) / 1000
-    const leakedRequests = elapsedSeconds * leakRate
-    const newRequests = Math.max(0, record.requests - leakedRequests) 
+    const result = await redis.eval(script, [key], [now, window, maxRequests])
 
-    if (newRequests >= maxRequests) { 
-        return false 
-    }
-
-
-    await redis.set(key, {
-        requests: newRequests + 1,
-        lastRequest: now 
-    }, {
-        ex: window
-    })
-
-
-    return true 
+    return result == 1
 }
 
 //
@@ -187,7 +236,7 @@ export async function rateLimiter({
     maxRequests: number
 }) {
     const userIP = ip.split(",")[0].trim()
-    const key = `rateLimiter:${endpoint}:${userIP}`
+    const key = `rateLimiter:${endpoint}:${strategy}:${userIP}`
 
     if (!(strategy in strategies)) {
         strategy = "token-bucket"
@@ -197,25 +246,14 @@ export async function rateLimiter({
     const strategyName = strategy as keyof typeof strategies
     let allowed = false
 
-    if (strategyName == "sliding-window") {
-        allowed = await slidingWindow({
-            key: key,
-            window: window,
-            maxRequests: maxRequests
-        })
-    }
-    else {
-        const record = await redis.get(key)
-
-        allowed = await strategies[strategyName]({
-            key: key,
-            record: record,
-            window: window,
-            maxRequests: maxRequests
-        })
-    }
+    allowed = await strategies[strategyName]({
+        key: key,
+        window: window,
+        maxRequests: maxRequests
+    })
  
 
     return allowed
 }
 
+ 

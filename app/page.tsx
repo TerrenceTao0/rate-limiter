@@ -102,9 +102,10 @@ export default function Home() {
           Rate<span className="text-violet-400">Limiter</span>
         </h1>
 
-        <p className="text-zinc-400 text-sm mt-2 max-w-md">
-          Compare rate limiting algorithms under concurrent load. 
-          Pick an endpoint and set a request count, to see results.
+        <p className="text-zinc-400 text-sm mt-2">
+          Compare the most popular rate limiting algorithms under concurrent load. 
+          <br />
+          Pick an endpoint and set a request count to see results.
         </p>
       </header>
 
