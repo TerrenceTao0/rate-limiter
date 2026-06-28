@@ -12,17 +12,19 @@ const redis = new Redis({
 export async function fixedWindow({
     key,
     window,
-    maxRequests 
+    maxRequests,
+    failStrategy = "open"
 }: {
     key: string 
     window: number 
-    maxRequests: number 
+    maxRequests: number,
+    failStrategy?: "open" | "close"
 }) {
     const script = `
         local key = KEYS[1]
 
-        local window = ARGV[1]
-        local maxRequests = ARGV[2]
+        local window = tonumber(ARGV[1])
+        local maxRequests = tonumber(ARGV[2])
         local current = redis.call('get', key)
         
         if (not current) then 
@@ -42,20 +44,29 @@ export async function fixedWindow({
         return 1
     `
 
-    const result = await redis.eval(script, [key], [window, maxRequests]) 
+    try {
+        const result = await redis.eval(script, [key], [window, maxRequests]) 
 
-    return result == 1 
+        return result == 1
+    } 
+    catch (error) {
+        console.error("Rate limit error: ", error)
+
+        return failStrategy == "open" 
+    }
 }
 
 
 export async function slidingWindow({
     key,
     window,
-    maxRequests
+    maxRequests,
+    failStrategy = "open"
 }: {
     key: string,
     window: number, 
-    maxRequests: number
+    maxRequests: number,
+    failStrategy?: "open" | "close"
 }) {
     const now = Date.now()
     const windowStart = now - window * 1000
@@ -71,34 +82,43 @@ export async function slidingWindow({
         local member = ARGV[5]
 
         redis.call('zremrangebyscore', key, 0, windowStart)
-        redis.call('expire', key, window)
 
         local count = redis.call('zcard', key)
 
-        if (count > maxRequests) then 
+        if (count >= maxRequests) then 
             return 0
         end
 
 
         redis.call('zadd', key, now, member)
+        redis.call('expire', key, window)
 
         return 1 
     `
 
-    const result = await redis.eval(script, [key], [now, window, windowStart, maxRequests, member])
+    try {
+        const result = await redis.eval(script, [key], [now, window, windowStart, maxRequests, member])
 
-    return result == 1
+        return result == 1
+    } 
+    catch (error) {
+        console.error("Rate limit error: ", error)
+
+        return failStrategy == "open" 
+    }
 }
 
 
 export async function tokenBucket({
     key,
     window,
-    maxRequests 
+    maxRequests,
+    failStrategy = "open"
 }: {
     key: string 
     window: number 
-    maxRequests: number 
+    maxRequests: number
+    failStrategy?: "open" | "close"
 }) {
     const now = Date.now()
 
@@ -146,20 +166,29 @@ export async function tokenBucket({
         return 1
     `
 
-    const result = await redis.eval(script, [key], [now, maxRequests, window])
+    try {
+        const result = await redis.eval(script, [key], [now, maxRequests, window])
 
-    return result == 1
+        return result == 1
+    } 
+    catch (error) {
+        console.error("Rate limit error: ", error)
+
+        return failStrategy == "open" 
+    }
 }
 
 
 export async function leakyBucket({
     key, 
     window, 
-    maxRequests
+    maxRequests,
+    failStrategy = "open"
 }: {
     key: string,
     window: number,
-    maxRequests: number
+    maxRequests: number,
+    failStrategy?: "open" | "close"
 }) {
     const now = Date.now()
 
@@ -208,9 +237,16 @@ export async function leakyBucket({
         return 1
     `
 
-    const result = await redis.eval(script, [key], [now, window, maxRequests])
+    try {
+        const result = await redis.eval(script, [key], [now, window, maxRequests])
 
-    return result == 1
+        return result == 1
+    } 
+    catch (error) {
+        console.error("Rate limit error: ", error)
+
+        return failStrategy == "open" 
+    }
 }
 
 //
